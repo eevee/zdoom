@@ -242,6 +242,7 @@ else()
 	set( GME_LIBRARIES gme )
 endif()
 
+set( LUA_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lua" )
 set( LZMA_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lzma/C" )
 
 if( NOT CMAKE_CROSSCOMPILING )
@@ -250,6 +251,7 @@ if( NOT CMAKE_CROSSCOMPILING )
 	endif()
 endif()
 
+add_subdirectory( lua )
 add_subdirectory( lzma )
 add_subdirectory( tools )
 add_subdirectory( dumb )
