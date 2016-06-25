@@ -8,13 +8,7 @@ extern "C" {
 #include "doomtype.h"
 #include "dthinker.h"
 #include "v_text.h"
-
-static const char* temp_lua_script = "\
-zprint('hello from lua!\\n')\
-for actor in allactors() do\
-    zprint(actor.classname)\
-end\
-";
+#include "w_wad.h"
 
 static int zlua_zprint(lua_State *L) {
     const char* s = luaL_checkstring(L, 1);
@@ -113,10 +107,24 @@ void run_temp_lua_code() {
     lua_pushcfunction(L, zlua_allactors);
     lua_setglobal(L, "allactors");
 
-    error = luaL_dostring(L, temp_lua_script);
-    if (error) {
-        Printf(TEXTCOLOR_RED "Lua error: %s\n", lua_tostring(L, -1));
-        lua_pop(L, 1);  // pop error message
+    // TODO figure out the actual directory structure
+    // TODO allow multiple
+    // TODO this runs on map start, not game start
+    int lumpnum = Wads.CheckNumForFullName("lua/startup.lua");
+    if (lumpnum != -1) {
+        int len = Wads.LumpLength(lumpnum);
+        // TODO should this be BYTE?  lua needs a char pointer
+        char *script = new char[len];
+        Wads.ReadLump(lumpnum, script);
+        // TODO how do i tell lua this is from a file?
+        // TODO seems to need a blank line at the end of the file...???
+        error = luaL_dostring(L, script);
+        if (error) {
+            Printf(TEXTCOLOR_RED "Lua error: %s\n", lua_tostring(L, -1));
+            lua_pop(L, 1);  // pop error message
+        }
+        // TODO should the compiled lua stick around somewhere...?  maybe it doesn't matter?
+        delete[] script;
     }
     lua_close(L);
 }
