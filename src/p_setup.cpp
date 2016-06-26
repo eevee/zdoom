@@ -73,6 +73,7 @@
 #include "p_blockmap.h"
 #include "r_utility.h"
 #include "p_spec.h"
+#include "p_lua.h"
 #ifndef NO_EDATA
 #include "edata.h"
 #endif
@@ -349,6 +350,7 @@ MapData *P_OpenMapData(const char * mapname, bool justcheck)
 						return NULL;
 					}
 					if (index == ML_BEHAVIOR) map->HasBehavior = true;
+					// TODO should check for ML_LUA here...?  when does this code run?
 
 					// The next lump is not part of this map anymore
 					if (index < 0) break;
@@ -437,6 +439,7 @@ MapData *P_OpenMapData(const char * mapname, bool justcheck)
 		{
 			const char* lumpname = map->resource->GetLump(i)->Name;
 
+			// TODO why is all this duplicated from above?
 			if (i == 1 && !strnicmp(lumpname, "TEXTMAP", 8))
 			{
 				map->isText = true;
@@ -465,6 +468,13 @@ MapData *P_OpenMapData(const char * mapname, bool justcheck)
 					else if (!strnicmp(lumpname, "BEHAVIOR",8))
 					{
 						index = ML_BEHAVIOR;
+						map->HasBehavior = true;
+					}
+					else if (!strnicmp(lumpname, "LUA",8))
+					{
+						index = ML_LUA;
+						// TODO unclear if this is the right thing to do, but
+						// it's necessary for P_LoadBehavior to be called
 						map->HasBehavior = true;
 					}
 					else if (!strnicmp(lumpname, "ENDMAP",8))
@@ -3313,6 +3323,11 @@ void P_LoadReject (MapData * map, bool junk)
 //
 void P_LoadBehavior(MapData * map)
 {
+	if (map->Size(ML_LUA) > 0)
+	{
+		map->Seek(ML_LUA);
+		temp_compile_map_lua(map->file, map->Size(ML_LUA));
+	}
 	if (map->Size(ML_BEHAVIOR) > 0)
 	{
 		map->Seek(ML_BEHAVIOR);

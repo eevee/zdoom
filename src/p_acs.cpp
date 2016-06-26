@@ -82,6 +82,7 @@
 #include "r_utility.h"
 #include "a_morph.h"
 #include "i_music.h"
+#include "p_lua.h"
 
 #include "g_shared/a_pickups.h"
 
@@ -9790,6 +9791,10 @@ int P_StartScript (AActor *who, line_t *where, int script, const char *map, cons
 {
 	if (map == NULL || 0 == strnicmp (level.MapName, map, 8))
 	{
+		// Try for a Lua script first
+		if (temp_call_lua_function_as_acs(who, where, script, map, args, argcount, flags))
+			return true;
+
 		FBehavior *module = NULL;
 		const ScriptPtr *scriptdata;
 
