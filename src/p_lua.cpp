@@ -1,3 +1,14 @@
+/*
+ * Glue for making Lua be a thing in ZDoom.
+ *
+ * This is an experiment.  I guarantee nothing.  No one has authorized this or
+ * said this will be merged into ZDoom.  I may not finish it.  I may change any
+ * and all of the API at any time.  DO NOT build elaborate mods against this
+ * expecting them to still work next week.
+ */
+
+#include <vector>
+
 extern "C" {
 #include <lua.h>
 #include <lauxlib.h>
@@ -6,6 +17,7 @@ extern "C" {
 
 #include "actor.h"
 #include "c_console.h"
+#include "cmdlib.h"
 #include "doomtype.h"
 #include "dthinker.h"
 #include "p_lnspec.h"
@@ -16,6 +28,59 @@ extern "C" {
 
 void luaZ_pushactor(lua_State *L, AActor *actor);
 
+// -----------------------------------------------------------------------------
+// Helpers for declaring types exposed to Lua with minimal fuss
+
+template<class T>
+class _ZLuaProperty {
+public:
+    const char* name;
+    ptrdiff_t offset;
+
+    _ZLuaProperty(const char* name, ptrdiff_t offset) : name(name), offset(offset) {}
+    virtual int get(lua_State* L, T* obj) const = 0;
+
+    // Implementations of getting for various types
+    int _get(lua_State* L, T* obj, BYTE& attribute) const
+    {
+        lua_pushinteger(L, attribute);
+        return 1;
+    }
+
+    int _get(lua_State* L, T* obj, int& attribute) const
+    {
+        lua_pushinteger(L, attribute);
+        return 1;
+    }
+
+    int _get(lua_State* L, T* obj, double& attribute) const
+    {
+        lua_pushnumber(L, attribute);
+        return 1;
+    }
+    // TODO set
+};
+
+// This is a stupid subclass that only exists to statically choose some of the
+// overloads above.  It also hides the templating over A so we can have a
+// homogenous list of properties.
+template<class T, class A>
+class _ZLuaPropertyImpl : public _ZLuaProperty<T> {
+public:
+    _ZLuaPropertyImpl(const char* name, ptrdiff_t offset) : _ZLuaProperty<T>(name, offset) {}
+    int get(lua_State* L, T* obj) const {
+        A& attribute = *(A*)((size_t)obj + this->offset);
+        return this->_get(L, obj, attribute);
+    }
+};
+
+#define ZLuaProperty(cls, name, attribute) new _ZLuaPropertyImpl<cls, decltype(cls::attribute)>(name, static_cast<ptrdiff_t>(myoffsetof(cls, attribute)))
+
+
+// -----------------------------------------------------------------------------
+// Lua functions
+
+// TODO need a log() wrapper too
 static int zlua_zprint(lua_State *L) {
     int argc = lua_gettop(L);
     FString msg;
@@ -34,6 +99,16 @@ static int zlua_zprint(lua_State *L) {
     return 0;
 }
 
+// -----------------------------------------------------------------------------
+// Lua types
+
+// .............................................................................
+// Thinker iterator for actors
+// NOTE: this was not particularly well thought-out, and I don't claim to
+// understand how I'm supposed to use it; it just made an interesting proof of
+// concept
+
+// TODO this appears to also iterate over actors that are in another actor's inventory...
 static int zlua_allactors_iter(lua_State *L);
 static int zlua_allactors(lua_State *L) {
     // Create space for the iterator
@@ -72,10 +147,26 @@ static int zlua_tthinkeraactor_gc(lua_State *L) {
     return 0;
 }
 
+// .............................................................................
+// Actor type
+
+static const std::vector<_ZLuaProperty<AActor>*> zlua_actor_props = {
+    ZLuaProperty(AActor, "weave_index_xy", WeaveIndexXY),
+    ZLuaProperty(AActor, "weave_index_z", WeaveIndexZ),
+    ZLuaProperty(AActor, "floorclip", Floorclip),
+    ZLuaProperty(AActor, "health", health),
+};
+
 static int zlua_actor_index(lua_State *L) {
     AActor *actor = *(AActor**)lua_touserdata(L, 1);
     // TODO check for a destroyed object
     const char* key = luaL_checkstring(L, 2);
+    for (auto& prop : zlua_actor_props) {
+        fprintf(stderr, "checking %s vs %s...\n", key, prop->name);
+        if (!strcmp(key, prop->name)) {
+            return prop->get(L, actor);
+        }
+    }
     if (!strcmp(key, "classname")) {
         lua_pushstring(L, actor->GetClass()->TypeName);
         return 1;
@@ -148,7 +239,70 @@ void luaZ_pushactor(lua_State *L, AActor *actor)
 }
 
 // -----------------------------------------------------------------------------
-// Public functions
+// Internal stuff
+
+static void _dump_lua_stack(lua_State *L) {
+    int i;
+    int top = lua_gettop(L);
+
+    fprintf(stderr, "--- begin Lua stack dump\n");
+    for (i = 1; i <= top; i++) {
+        int t = lua_type(L, i);
+        fprintf(stderr, "%d\t", i);
+        switch (t) {
+            case LUA_TSTRING:  /* strings */
+            fprintf(stderr, "`%s'", lua_tostring(L, i));
+            break;
+
+            case LUA_TBOOLEAN:  /* booleans */
+            fprintf(stderr, lua_toboolean(L, i) ? "true" : "false");
+            break;
+
+            case LUA_TNUMBER:  /* numbers */
+            fprintf(stderr, "%g", lua_tonumber(L, i));
+            break;
+
+            default:  /* other values */
+            fprintf(stderr, "%s", lua_typename(L, t));
+            break;
+        }
+
+        fprintf(stderr, "\n");
+    }
+
+    fprintf(stderr, "--- end Lua stack dump\n");
+}
+
+static int get_lua_traceback(lua_State *L) {
+    //lua_getfield(L, LUA_GLOBALSINDEX, "debug");
+    lua_getglobal(L, "debug");
+    lua_getfield(L, -1, "traceback");
+    lua_pushvalue(L, 1);
+    lua_pushinteger(L, 2);
+    lua_call(L, 2, 1);
+    fprintf(stderr, "hi from get_lua_traceback %s\n", lua_tostring(L, -1));
+    return 1;
+}
+
+static bool _call_lua(lua_State* L, int argc, int retc)
+{
+    // Stick the traceback generator just before the function itself
+    lua_pushcfunction(L, get_lua_traceback);
+    lua_insert(L, -2 - argc);
+
+    int error = lua_pcall(L, argc, 0, -2 - argc);
+    lua_pop(L, -1 - retc);  // pop errfunc
+    if (error) {
+        Printf(TEXTCOLOR_RED "Lua error: %s\n", lua_tostring(L, -1));
+        lua_pop(L, 1);  // pop error message
+        return false;
+    }
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+// Public interface
+// Really bad at the moment, don't use anything
 
 // TODO LOL GLOBALS ARE BAD
 // TODO unload everything (!) on map exit
@@ -158,11 +312,8 @@ void run_temp_lua_code() {
     if (!current_map_lua)
         return;
 
-    lua_call(current_map_lua, 0, 0);
-
-
-
-
+    // TODO this breaks if there's no function on top.  of course.
+    _call_lua(current_map_lua, 0, 0);
 
     // TODO need to keep the startup thing working too, somehow?  should it be loaded early too?
     return;
@@ -212,7 +363,7 @@ void temp_compile_map_lua(FileReader* fr, int len)
     // TODO hmmm need map name
     error = luaL_loadbuffer(current_map_lua, script, len, "<map script>");
     if (error) {
-        Printf(TEXTCOLOR_RED "Lua error: %s\n", lua_tostring(current_map_lua, -1));
+        Printf(TEXTCOLOR_RED "Error loading Lua script: %s\n", lua_tostring(current_map_lua, -1));
         lua_pop(current_map_lua, 1);  // pop error message
     }
 }
@@ -233,13 +384,9 @@ bool temp_call_lua_function_as_acs(AActor *who, line_t *where, int script, const
 
     const char *script_name = script_fname.GetChars();
 
-    // Find a function with the given name
-    int functype = lua_getglobal(current_map_lua, script_name);
-    if (functype != LUA_TFUNCTION)
-    {
-        lua_pop(current_map_lua, 1);
-        return false;
-    }
+    // Find the thing with the given name.  If it's the wrong type, well,
+    // that's your fault.
+    lua_getglobal(current_map_lua, script_name);
 
     // Arguments: activator, side, then any args from the special
     luaZ_pushactor(current_map_lua, who);
@@ -250,10 +397,6 @@ bool temp_call_lua_function_as_acs(AActor *who, line_t *where, int script, const
     }
 
     // TODO return value, for the sake of script "results"
-    int error = lua_pcall(current_map_lua, argcount + 2, 0, 0);
-    if (error) {
-        Printf(TEXTCOLOR_RED "Lua error: %s\n", lua_tostring(current_map_lua, -1));
-        lua_pop(current_map_lua, 1);  // pop error message
-    }
+    _call_lua(current_map_lua, argcount + 2, 0);
     return true;
 }
