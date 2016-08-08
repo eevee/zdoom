@@ -14,6 +14,7 @@ extern "C" {
 #include <lauxlib.h>
 #include <lualib.h>
 }
+#include <sol.hpp>
 
 #include "actor.h"
 #include "c_console.h"
@@ -25,57 +26,6 @@ extern "C" {
 #include "v_text.h"
 #include "w_wad.h"
 #include "zstring.h"
-
-void luaZ_pushactor(lua_State *L, AActor *actor);
-
-// -----------------------------------------------------------------------------
-// Helpers for declaring types exposed to Lua with minimal fuss
-
-template<class T>
-class _ZLuaProperty {
-public:
-    const char* name;
-    ptrdiff_t offset;
-
-    _ZLuaProperty(const char* name, ptrdiff_t offset) : name(name), offset(offset) {}
-    virtual int get(lua_State* L, T* obj) const = 0;
-
-    // Implementations of getting for various types
-    int _get(lua_State* L, T* obj, BYTE& attribute) const
-    {
-        lua_pushinteger(L, attribute);
-        return 1;
-    }
-
-    int _get(lua_State* L, T* obj, int& attribute) const
-    {
-        lua_pushinteger(L, attribute);
-        return 1;
-    }
-
-    int _get(lua_State* L, T* obj, double& attribute) const
-    {
-        lua_pushnumber(L, attribute);
-        return 1;
-    }
-    // TODO set
-};
-
-// This is a stupid subclass that only exists to statically choose some of the
-// overloads above.  It also hides the templating over A so we can have a
-// homogenous list of properties.
-template<class T, class A>
-class _ZLuaPropertyImpl : public _ZLuaProperty<T> {
-public:
-    _ZLuaPropertyImpl(const char* name, ptrdiff_t offset) : _ZLuaProperty<T>(name, offset) {}
-    int get(lua_State* L, T* obj) const {
-        A& attribute = *(A*)((size_t)obj + this->offset);
-        return this->_get(L, obj, attribute);
-    }
-};
-
-#define ZLuaProperty(cls, name, attribute) new _ZLuaPropertyImpl<cls, decltype(cls::attribute)>(name, static_cast<ptrdiff_t>(myoffsetof(cls, attribute)))
-
 
 // -----------------------------------------------------------------------------
 // Lua functions
@@ -102,106 +52,6 @@ static int zlua_zprint(lua_State *L) {
 // -----------------------------------------------------------------------------
 // Lua types
 
-// .............................................................................
-// Thinker iterator for actors
-// NOTE: this was not particularly well thought-out, and I don't claim to
-// understand how I'm supposed to use it; it just made an interesting proof of
-// concept
-
-// TODO this appears to also iterate over actors that are in another actor's inventory...
-static int zlua_allactors_iter(lua_State *L);
-static int zlua_allactors(lua_State *L) {
-    // Create space for the iterator
-    // TODO note must be first etc
-    TThinkerIterator<AActor>** iter = (TThinkerIterator<AActor>**)lua_newuserdata(L, sizeof(TThinkerIterator<AActor>*));
-
-    // Set its metatable BEFORE opening it
-    luaL_getmetatable(L, "zdoom.TThinkerIterator.AActor");
-    lua_setmetatable(L, -2);
-
-    // Create the iterator
-    *iter = new TThinkerIterator<AActor>();
-    // TODO check for null??
-    // Create and return the iterator function, whose upvalue (closed-over
-    // value) is the iterator we just created
-    lua_pushcclosure(L, zlua_allactors_iter, 1);
-    return 1;
-}
-
-static int zlua_allactors_iter(lua_State *L) {
-    // TODO luaL_checkudata
-    TThinkerIterator<AActor>** iter = (TThinkerIterator<AActor>**)lua_touserdata(L, lua_upvalueindex(1));
-    AActor *actor = (*iter)->Next();
-    if (actor) {
-        luaZ_pushactor(L, actor);
-        return 1;
-    }
-    else {
-        return 0;
-    }
-}
-
-static int zlua_tthinkeraactor_gc(lua_State *L) {
-    TThinkerIterator<AActor>** iter = (TThinkerIterator<AActor>**)lua_touserdata(L, 1);
-    delete *iter;
-    return 0;
-}
-
-// .............................................................................
-// Actor type
-
-static const std::vector<_ZLuaProperty<AActor>*> zlua_actor_props = {
-    ZLuaProperty(AActor, "weave_index_xy", WeaveIndexXY),
-    ZLuaProperty(AActor, "weave_index_z", WeaveIndexZ),
-    ZLuaProperty(AActor, "floorclip", Floorclip),
-    ZLuaProperty(AActor, "health", health),
-};
-
-static int zlua_actor_index(lua_State *L) {
-    AActor *actor = *(AActor**)lua_touserdata(L, 1);
-    // TODO check for a destroyed object
-    const char* key = luaL_checkstring(L, 2);
-    for (auto& prop : zlua_actor_props) {
-        fprintf(stderr, "checking %s vs %s...\n", key, prop->name);
-        if (!strcmp(key, prop->name)) {
-            return prop->get(L, actor);
-        }
-    }
-    if (!strcmp(key, "classname")) {
-        lua_pushstring(L, actor->GetClass()->TypeName);
-        return 1;
-    }
-    return 0;
-}
-
-static int zlua_actor_tostring(lua_State *L) {
-    AActor *actor = *(AActor**)luaL_checkudata(L, 1, "zdoom.AActor");
-    // TODO check for a destroyed object
-    // TODO maybe include classname
-    lua_pushstring(L, "<actor>");
-    return 1;
-}
-
-static const luaL_Reg zlua_actor_meta[] = {
-    {"__index", zlua_actor_index},
-    {"__tostring", zlua_actor_tostring},
-    {NULL, NULL}
-};
-
-
-/*
-TODO this all is leading up to having this as a separate lib, which i don't think i care about yet
-static const luaL_reg zdoomlib[] = {
-    {"zprint", zlua_zprint},
-    {NULL, NULL}
-};
-
-int luaopen_zdoom(lua_State *L) {
-    luaL_openlib(L, "zdoom", zdoomlib, 0);
-    return 1;
-}
-*/
-
 // -----------------------------------------------------------------------------
 // Helpers
 
@@ -210,33 +60,33 @@ lua_State *create_lua_state()
     lua_State *L = luaL_newstate();
     luaL_openlibs(L);
 
-    // Actor type
-    luaL_newmetatable(L, "zdoom.AActor");
-    luaL_setfuncs(L, zlua_actor_meta, 0);
-    // TODO should i pop this back off the stack now?
+    sol::state_view lua(L);
 
-    // Thinker type
-    luaL_newmetatable(L, "zdoom.TThinkerIterator.AActor");
-    lua_pushstring(L, "__gc");
-    lua_pushcfunction(L, zlua_tthinkeraactor_gc);
-    lua_settable(L, -3);
+    // Actor type
+    lua.new_usertype<AActor>("zdoom.AActor",
+        "__tostring", [](AActor& actor) { return "<actor>"; },
+        "classname", sol::property([](AActor& actor) -> const char* { return actor.GetClass()->TypeName; }),
+
+        "health", &AActor::health,
+        "floorclip", &AActor::Floorclip,
+        "weave_index_xy", &AActor::WeaveIndexXY,
+        "weave_index_z", &AActor::WeaveIndexZ);
 
     // Built-in functions
-    lua_pushcfunction(L, zlua_zprint);
-    lua_setglobal(L, "zprint");
-    lua_pushcfunction(L, zlua_allactors);
-    lua_setglobal(L, "allactors");
+    lua["zprint"] = zlua_zprint;
+    // NOTE: this was not particularly well thought-out, and I don't claim to
+    // understand how I'm supposed to use it; it just made an interesting proof
+    // of concept
+    lua["allactors"] = [] {
+        TThinkerIterator<AActor> iter;
+        return sol::as_function([iter]() mutable {
+            return iter.Next();
+        });
+    };
 
     return L;
 }
 
-void luaZ_pushactor(lua_State *L, AActor *actor)
-{
-    AActor **ptr = (AActor**)lua_newuserdata(L, sizeof(AActor**));
-    luaL_getmetatable(L, "zdoom.AActor");
-    lua_setmetatable(L, -2);
-    *ptr = actor;
-}
 
 // -----------------------------------------------------------------------------
 // Internal stuff
@@ -389,7 +239,7 @@ bool temp_call_lua_function_as_acs(AActor *who, line_t *where, int script, const
     lua_getglobal(current_map_lua, script_name);
 
     // Arguments: activator, side, then any args from the special
-    luaZ_pushactor(current_map_lua, who);
+    sol::stack::push(current_map_lua, who);
     lua_pushnil(current_map_lua);  // TODO side
     for (int a = 0; a < argcount; a++)
     {
