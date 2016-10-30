@@ -21,6 +21,7 @@ extern "C" {
 #include "cmdlib.h"
 #include "doomtype.h"
 #include "dthinker.h"
+#include "g_shared/a_pickups.h"
 #include "p_lnspec.h"
 #include "v_font.h"
 #include "v_text.h"
@@ -50,7 +51,59 @@ static int zlua_zprint(lua_State *L) {
 }
 
 // -----------------------------------------------------------------------------
-// Lua types
+// Dummy types used for exposing to Lua
+
+// Actor inventory
+// There is no actor inventory container object; an actor's inventory is just a
+// pointer to the first thing in its inventory, and the rest are a linked list.
+// This is a dummy object that wraps an actor and provides some standard
+// inventory access.
+// TODO is this the sort of thing that builtin ACS functions should be
+// rewritten in terms of?
+struct ZLuaInventory {
+    TObjPtr<AActor> actor;
+    ZLuaInventory(AActor& actor) : actor(&actor) {}
+
+    AInventory* find_by_name(const char* type) {
+        if (stricmp(type, "Armor") == 0)
+        {
+            type = "BasicArmor";
+        }
+        // TODO the acs version of this function also accepts "health", but that's not an item
+
+        PClassActor *info = PClass::FindActor (type);
+        if (info == NULL)
+        {
+            // TODO unsure this is right
+            throw sol::error("no such actor class");
+        }
+
+        return this->find(info);
+    }
+
+    AInventory* find(PClassActor* cls)
+    {
+        if (!cls->IsDescendantOf(RUNTIME_CLASS(AInventory)))
+        {
+            // TODO unsure this is right
+            throw sol::error("not an inventory item");
+        }
+
+        return this->actor->FindInventory(cls);
+    }
+
+    std::function<AInventory* ()> iter()
+    {
+        TObjPtr<AInventory> item= this->actor->Inventory;
+        // TODO maybe mark a few more methods const
+        return [item]() mutable {
+            AInventory* ret = item;
+            if (ret)
+                item = ret->NextInv();
+            return ret;
+        };
+    }
+};
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -62,21 +115,47 @@ lua_State *create_lua_state()
 
     sol::state_view lua(L);
 
+    // Actor class type
+    // TODO contrary to my expectations, most of the stuff you see in DECORATE
+    // doesn't actually live here!  it seems to live on a single "default"
+    // actor.  so this might need to be a goofy wrapper type as well, if we
+    // want to allow lua to examine actor types directly
+    lua.new_usertype<PClassActor>("zdoom.PClassActor");
+
     // Actor type
     lua.new_usertype<AActor>("zdoom.AActor",
         "__tostring", [](AActor& actor) { return "<actor>"; },
         "classname", sol::property([](AActor& actor) -> const char* { return actor.GetClass()->TypeName; }),
+
+        "inventory", sol::property([](AActor& actor) -> ZLuaInventory { return ZLuaInventory(actor); }),
 
         "health", &AActor::health,
         "floorclip", &AActor::Floorclip,
         "weave_index_xy", &AActor::WeaveIndexXY,
         "weave_index_z", &AActor::WeaveIndexZ);
 
+    // Actor inventory type
+    lua.new_usertype<ZLuaInventory>("zdoom.AActor.inventory",
+        // TODO should be inventory for <actor> "__tostring", [](AActor& actor) { return "<actor>"; },
+        "find", sol::overload(&ZLuaInventory::find, &ZLuaInventory::find_by_name),
+        "iter", &ZLuaInventory::iter);
+
+    // Inventory item type (inherits from AActor)
+    lua.new_usertype<AInventory>("zdoom.AInventory",
+        "__tostring", [](AInventory& actor) { return "<item>"; },
+        // TODO is this supposed to be inherited automatically??
+        "classname", sol::property([](AInventory& actor) -> const char* { return actor.GetClass()->TypeName; }),
+
+        "amount", &AInventory::Amount,
+        "max_amount", &AInventory::MaxAmount,
+        sol::base_classes, sol::bases<AActor>());
+
     // Built-in functions
     lua["zprint"] = zlua_zprint;
     // NOTE: this was not particularly well thought-out, and I don't claim to
     // understand how I'm supposed to use it; it just made an interesting proof
     // of concept
+    // TODO i am not 100% sure how lifetime works here
     lua["allactors"] = [] {
         TThinkerIterator<AActor> iter;
         return sol::as_function([iter]() mutable {
