@@ -3447,6 +3447,8 @@ extern polyblock_t **PolyBlockMap;
 
 void P_FreeLevelData ()
 {
+	temp_unload_lua();
+
 	interpolator.ClearInterpolations();	// [RH] Nothing to interpolate on a fresh level.
 	Renderer->CleanLevelData();
 	FPolyObj::ClearAllSubsectorLinks(); // can't be done as part of the polyobj deletion process.
